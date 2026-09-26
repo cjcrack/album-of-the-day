@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="One album from Rolling Stone's 500 Greatest Albums of All Time, selected every day.">
+  <title>Album of the Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./">ALBUM<span>OF</span>THE DAY</a>
+    <nav>
+      <button id="randomBtn" class="nav-btn">Random</button>
+      <button id="favoritesBtn" class="nav-btn">Favorites <span id="favCount">0</span></button>
+    </nav>
+  </header>
+
+  <main id="app">
+    <section class="hero">
+      <div class="eyebrow">TODAY'S PICK</div>
+      <div class="date" id="date"></div>
+
+      <div class="album-grid">
+        <div class="cover-wrap">
+          <img id="cover" class="cover" alt="">
+          <div class="rank" id="rank"></div>
+        </div>
+
+        <div class="info">
+          <div class="artist" id="artist"></div>
+          <h1 id="title"></h1>
+          <div class="year" id="year"></div>
+
+          <div class="actions">
+            <a id="apple" class="button" target="_blank" rel="noopener">Apple Music</a>
+            <a id="spotify" class="button" target="_blank" rel="noopener">Spotify</a>
+            <button id="favorite" class="button secondary">♡ Favorite</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="facts">
+      <div>
+        <span>LABEL</span><strong id="label">—</strong>
+      </div>
+      <div>
+        <span>YEAR</span><strong id="factYear">—</strong>
+      </div>
+      <div>
+        <span>ROLLING STONE</span><strong id="factRank">—</strong>
+      </div>
+    </section>
+
+    <section class="wiki">
+      <div class="section-label">WIKIPEDIA</div>
+      <h2 id="wikiTitle">Loading…</h2>
+      <p id="wikiExtract"></p>
+      <a id="wikiLink" class="text-link" target="_blank" rel="noopener">Read more on Wikipedia →</a>
+      <div id="wikiMeta" class="wiki-meta"></div>
+    </section>
+
+    <section class="notes">
+      <div class="section-label">ABOUT THIS PROJECT</div>
+      <p>One album is selected from Rolling Stone's 500 Greatest Albums of All Time each day. The daily selection is deterministic, so everyone gets the same album on the same date.</p>
+    </section>
+
+    <footer class="pager">
+      <button id="prevBtn">← Yesterday</button>
+      <button id="todayBtn">Today</button>
+      <button id="nextBtn">Tomorrow →</button>
+    </footer>
+  </main>
+
+  <div id="favoritesPanel" class="modal hidden">
+    <div class="modal-card">
+      <button id="closeFavorites" class="close">×</button>
+      <div class="section-label">YOUR FAVORITES</div>
+      <div id="favoritesList"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
