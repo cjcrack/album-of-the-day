@@ -45,7 +45,7 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4    needs: build
+        uses: actions/deploy-pages@v4
     runs-on: ubuntu-latest
 
     environment:
@@ -55,7 +55,7 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4    needs: build
+        uses: actions/deploy-pages@v4
     runs-on: ubuntu-latest
 
     environment:
