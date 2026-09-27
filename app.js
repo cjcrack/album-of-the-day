@@ -49,120 +49,607 @@ let currentDate = new Date();
 let currentAlbum = null;
 let randomMode = false;
 
-async function loadAlbums(){
-  try{
-    const r = await fetch("./data/albums.json");
-    if(r.ok){
-      const data = await r.json();
-      if(Array.isArray(data) && data.length >= 100) albums = data;
+
+/* =========================================================
+   DATA
+   ========================================================= */
+
+async function loadAlbums() {
+  try {
+    const response = await fetch("./data/albums.json", {
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      console.warn("Could not load albums.json:", response.status);
+      return;
     }
-  }catch(e){}
+
+    const data = await response.json();
+
+    if (Array.isArray(data) && data.length >= 100) {
+      albums = data;
+      console.log(`Loaded ${albums.length} albums from albums.json`);
+    } else {
+      console.warn(
+        "albums.json was loaded but contains too few albums. Using fallback data."
+      );
+    }
+  } catch (error) {
+    console.error("Error loading albums.json:", error);
+  }
 }
 
-function dateKey(d){
-  return new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Warsaw",year:"numeric",month:"2-digit",day:"2-digit"}).format(d);
+
+/* =========================================================
+   DATE / DAILY ALBUM
+   ========================================================= */
+
+function dateKey(date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Warsaw",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
 }
-function hash(s){
-  let h=2166136261;
-  for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}
-  return h>>>0;
-}
-function dailyAlbum(d){
-  return albums[hash(dateKey(d)) % albums.length];
-}
-function formatDate(d){
-  return new Intl.DateTimeFormat("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"}).format(d);
-}
-function coverUrl(a){
-  const q = encodeURIComponent(`${a.artist} ${a.title}`);
-  return `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=1&prop=imageinfo&iiprop=url&iiurlwidth=900&format=json&origin=*`;
-}
-async function loadCover(a){
-  try{
-    const r=await fetch(coverUrl(a)); const j=await r.json();
-    const pages=j.query?.pages;
-    if(pages){const p=Object.values(pages)[0]; return p.imageinfo?.[0]?.thumburl || p.imageinfo?.[0]?.url;}
-  }catch(e){}
-  return "";
-}
-async function loadWikipedia(a){
-  const title = encodeURIComponent(`${a.artist} - ${a.title}`);
-  const candidates = [
-    `https://en.wikipedia.org/api/rest_v1/page/summary/${title}`,
-    `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(a.title)}`
-  ];
-  for(const url of candidates){
-    try{
-      const r=await fetch(url);
-      if(r.ok){
-        const j=await r.json();
-        if(j.extract){
-          return {title:j.title, extract:j.extract, url:j.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encodeURIComponent(j.title.replaceAll(" ","_"))}`};
-        }
-      }
-    }catch(e){}
+
+
+function hash(string) {
+  let h = 2166136261;
+
+  for (let i = 0; i < string.length; i++) {
+    h ^= string.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
+
+  return h >>> 0;
+}
+
+
+function dailyAlbum(date) {
+  return albums[hash(dateKey(date)) % albums.length];
+}
+
+
+function formatDate(date) {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric"
+  }).format(date);
+}
+
+
+/* =========================================================
+   WIKIMEDIA COMMONS COVER
+   ========================================================= */
+
+function coverUrl(album) {
+  const query = encodeURIComponent(
+    `${album.artist} ${album.title}`
+  );
+
+  return (
+    "https://commons.wikimedia.org/w/api.php" +
+    "?action=query" +
+    "&generator=search" +
+    `&gsrsearch=${query}` +
+    "&gsrnamespace=6" +
+    "&gsrlimit=1" +
+    "&prop=imageinfo" +
+    "&iiprop=url" +
+    "&iiurlwidth=900" +
+    "&format=json" +
+    "&origin=*"
+  );
+}
+
+
+async function loadCover(album) {
+  try {
+    const response = await fetch(coverUrl(album));
+
+    if (!response.ok) {
+      return "";
+    }
+
+    const data = await response.json();
+    const pages = data.query?.pages;
+
+    if (!pages) {
+      return "";
+    }
+
+    const page = Object.values(pages)[0];
+
+    return (
+      page?.imageinfo?.[0]?.thumburl ||
+      page?.imageinfo?.[0]?.url ||
+      ""
+    );
+  } catch (error) {
+    console.warn("Cover lookup failed:", error);
+    return "";
+  }
+}
+
+
+/* =========================================================
+   WIKIPEDIA
+   ========================================================= */
+
+async function loadWikipedia(album) {
+  const candidates = [
+    `${album.artist} - ${album.title}`,
+    album.title
+  ];
+
+  for (const candidate of candidates) {
+    const title = encodeURIComponent(candidate);
+
+    const url =
+      `https://en.wikipedia.org/api/rest_v1/page/summary/${title}`;
+
+    try {
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const data = await response.json();
+
+      if (data.extract) {
+        return {
+          title: data.title,
+          extract: data.extract,
+          url:
+            data.content_urls?.desktop?.page ||
+            `https://en.wikipedia.org/wiki/${encodeURIComponent(
+              data.title.replaceAll(" ", "_")
+            )}`
+        };
+      }
+    } catch (error) {
+      console.warn("Wikipedia lookup failed:", error);
+    }
+  }
+
   return null;
 }
-function favorites(){return JSON.parse(localStorage.getItem("albumFavorites")||"[]")}
-function isFavorite(a){return favorites().some(x=>x.rank===a.rank)}
-function toggleFavorite(a){
-  let f=favorites();
-  if(isFavorite(a)) f=f.filter(x=>x.rank!==a.rank); else f.unshift(a);
-  localStorage.setItem("albumFavorites",JSON.stringify(f));
-  updateFavoriteUI(); renderFavorites();
-}
-function updateFavoriteUI(){
-  document.querySelector("#favCount").textContent=favorites().length;
-  document.querySelector("#favorite").textContent=isFavorite(currentAlbum)?"♥ Favorite":"♡ Favorite";
-}
-async function render(){
-  const a = randomMode ? albums[Math.floor(Math.random()*albums.length)] : dailyAlbum(currentDate);
-  currentAlbum=a;
-  document.querySelector("#date").textContent=randomMode?"Random selection":formatDate(currentDate);
-  document.querySelector("#artist").textContent=a.artist;
-  document.querySelector("#title").textContent=a.title;
-  document.querySelector("#year").textContent=a.year || "";
-  document.querySelector("#rank").textContent=`ROLLING STONE #${a.rank}`;
-  document.querySelector("#label").textContent=a.label||"—";
-  document.querySelector("#factYear").textContent=a.year||"—";
-  document.querySelector("#factRank").textContent=`#${a.rank}`;
-  document.querySelector("#apple").href=`https://music.apple.com/us/search?term=${encodeURIComponent(a.artist+" "+a.title)}`;
-  document.querySelector("#spotify").href=`https://open.spotify.com/search/${encodeURIComponent(a.artist+" "+a.title)}`;
-  document.querySelector("#cover").src="";
-  document.querySelector("#cover").alt=`${a.artist} — ${a.title}`;
-  updateFavoriteUI();
-  document.querySelector("#wikiTitle").textContent="Loading…";
-  document.querySelector("#wikiExtract").textContent="";
-  document.querySelector("#wikiLink").style.display="none";
-  document.querySelector("#wikiMeta").textContent="";
-  const [cover,wiki]=await Promise.all([loadCover(a),loadWikipedia(a)]);
-  if(cover) document.querySelector("#cover").src=cover;
-  else document.querySelector("#cover").src="data:image/svg+xml,"+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800"><rect width="100%" height="100%" fill="#ddd"/><text x="50%" y="48%" text-anchor="middle" font-family="Arial" font-size="34">${a.artist}</text><text x="50%" y="53%" text-anchor="middle" font-family="Arial" font-size="28">${a.title}</text></svg>`);
-  if(wiki){
-    document.querySelector("#wikiTitle").textContent=wiki.title;
-    document.querySelector("#wikiExtract").textContent=wiki.extract;
-    document.querySelector("#wikiLink").href=wiki.url;
-    document.querySelector("#wikiLink").style.display="inline";
-    document.querySelector("#wikiMeta").textContent="Source: English Wikipedia · retrieved live";
-  }else{
-    document.querySelector("#wikiTitle").textContent="Wikipedia article not found";
-    document.querySelector("#wikiExtract").textContent="No matching English Wikipedia summary was found for this album.";
+
+
+/* =========================================================
+   FAVORITES
+   ========================================================= */
+
+function favorites() {
+  try {
+    return JSON.parse(
+      localStorage.getItem("albumFavorites") || "[]"
+    );
+  } catch (error) {
+    return [];
   }
 }
-function renderFavorites(){
-  const list=document.querySelector("#favoritesList"), f=favorites();
-  if(!f.length){list.innerHTML="<p>No favorites yet.</p>";return}
-  list.innerHTML=f.map(a=>`<div class="favorite-row"><button data-rank="${a.rank}"><strong>${a.artist}</strong> — ${a.title}</button><span>#${a.rank}</span></div>`).join("");
-  list.querySelectorAll("button").forEach(b=>b.onclick=()=>{const a=albums.find(x=>x.rank==b.dataset.rank); if(a){currentAlbum=a;randomMode=true;render();document.querySelector("#favoritesPanel").classList.add("hidden")}})
-}
-document.querySelector("#favorite").onclick=()=>toggleFavorite(currentAlbum);
-document.querySelector("#randomBtn").onclick=()=>{randomMode=true;render()};
-document.querySelector("#prevBtn").onclick=()=>{randomMode=false;currentDate.setDate(currentDate.getDate()-1);render()};
-document.querySelector("#nextBtn").onclick=()=>{randomMode=false;currentDate.setDate(currentDate.getDate()+1);render()};
-document.querySelector("#todayBtn").onclick=()=>{randomMode=false;currentDate=new Date();render()};
-document.querySelector("#favoritesBtn").onclick=()=>{renderFavorites();document.querySelector("#favoritesPanel").classList.remove("hidden")};
-document.querySelector("#closeFavorites").onclick=()=>document.querySelector("#favoritesPanel").classList.add("hidden");
 
-await loadAlbums();
-render();
+
+function isFavorite(album) {
+  if (!album) {
+    return false;
+  }
+
+  return favorites().some(
+    item => item.rank === album.rank
+  );
+}
+
+
+function toggleFavorite(album) {
+  if (!album) {
+    return;
+  }
+
+  let favoriteList = favorites();
+
+  if (isFavorite(album)) {
+    favoriteList = favoriteList.filter(
+      item => item.rank !== album.rank
+    );
+  } else {
+    favoriteList.unshift(album);
+  }
+
+  localStorage.setItem(
+    "albumFavorites",
+    JSON.stringify(favoriteList)
+  );
+
+  updateFavoriteUI();
+  renderFavorites();
+}
+
+
+function updateFavoriteUI() {
+  const favoriteCount = document.querySelector("#favCount");
+  const favoriteButton = document.querySelector("#favorite");
+
+  if (favoriteCount) {
+    favoriteCount.textContent = favorites().length;
+  }
+
+  if (favoriteButton && currentAlbum) {
+    favoriteButton.textContent = isFavorite(currentAlbum)
+      ? "♥ Favorite"
+      : "♡ Favorite";
+  }
+}
+
+
+/* =========================================================
+   PLACEHOLDER COVER
+   ========================================================= */
+
+function placeholderCover(album) {
+  const artist = String(album.artist || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+
+  const title = String(album.title || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg"
+         viewBox="0 0 800 800">
+      <rect width="100%" height="100%" fill="#ddd"/>
+      <text x="50%" y="48%"
+            text-anchor="middle"
+            font-family="Arial"
+            font-size="34">
+        ${artist}
+      </text>
+      <text x="50%" y="53%"
+            text-anchor="middle"
+            font-family="Arial"
+            font-size="28">
+        ${title}
+      </text>
+    </svg>
+  `;
+
+  return "data:image/svg+xml," + encodeURIComponent(svg);
+}
+
+
+/* =========================================================
+   MAIN RENDER
+   ========================================================= */
+
+async function render() {
+  const album = randomMode
+    ? albums[Math.floor(Math.random() * albums.length)]
+    : dailyAlbum(currentDate);
+
+  currentAlbum = album;
+
+  const dateElement = document.querySelector("#date");
+  const artistElement = document.querySelector("#artist");
+  const titleElement = document.querySelector("#title");
+  const yearElement = document.querySelector("#year");
+  const rankElement = document.querySelector("#rank");
+  const labelElement = document.querySelector("#label");
+  const factYearElement = document.querySelector("#factYear");
+  const factRankElement = document.querySelector("#factRank");
+  const coverElement = document.querySelector("#cover");
+  const appleElement = document.querySelector("#apple");
+  const spotifyElement = document.querySelector("#spotify");
+
+  if (dateElement) {
+    dateElement.textContent = randomMode
+      ? "Random selection"
+      : formatDate(currentDate);
+  }
+
+  if (artistElement) {
+    artistElement.textContent = album.artist;
+  }
+
+  if (titleElement) {
+    titleElement.textContent = album.title;
+  }
+
+  if (yearElement) {
+    yearElement.textContent = album.year || "";
+  }
+
+  if (rankElement) {
+    rankElement.textContent = `ROLLING STONE #${album.rank}`;
+  }
+
+  if (labelElement) {
+    labelElement.textContent = album.label || "—";
+  }
+
+  if (factYearElement) {
+    factYearElement.textContent = album.year || "—";
+  }
+
+  if (factRankElement) {
+    factRankElement.textContent = `#${album.rank}`;
+  }
+
+  if (appleElement) {
+    appleElement.href =
+      `https://music.apple.com/us/search?term=${encodeURIComponent(
+        `${album.artist} ${album.title}`
+      )}`;
+  }
+
+  if (spotifyElement) {
+    spotifyElement.href =
+      `https://open.spotify.com/search/${encodeURIComponent(
+        `${album.artist} ${album.title}`
+      )}`;
+  }
+
+  if (coverElement) {
+    coverElement.src = "";
+    coverElement.alt = `${album.artist} — ${album.title}`;
+  }
+
+  updateFavoriteUI();
+
+  const wikiTitle = document.querySelector("#wikiTitle");
+  const wikiExtract = document.querySelector("#wikiExtract");
+  const wikiLink = document.querySelector("#wikiLink");
+  const wikiMeta = document.querySelector("#wikiMeta");
+
+  if (wikiTitle) {
+    wikiTitle.textContent = "Loading…";
+  }
+
+  if (wikiExtract) {
+    wikiExtract.textContent = "";
+  }
+
+  if (wikiLink) {
+    wikiLink.style.display = "none";
+    wikiLink.removeAttribute("href");
+  }
+
+  if (wikiMeta) {
+    wikiMeta.textContent = "";
+  }
+
+  /*
+   * Display a placeholder immediately.
+   * This means the album itself is visible even if
+   * Wikimedia or Wikipedia is temporarily unavailable.
+   */
+  if (coverElement) {
+    coverElement.src = placeholderCover(album);
+  }
+
+  /*
+   * Load external information independently.
+   * Failure of one service does not prevent the other.
+   */
+  const [cover, wiki] = await Promise.allSettled([
+    loadCover(album),
+    loadWikipedia(album)
+  ]);
+
+  /*
+   * Cover
+   */
+  if (
+    cover.status === "fulfilled" &&
+    cover.value &&
+    coverElement
+  ) {
+    coverElement.src = cover.value;
+  }
+
+  /*
+   * Wikipedia
+   */
+  if (
+    wiki.status === "fulfilled" &&
+    wiki.value
+  ) {
+    const wikiData = wiki.value;
+
+    if (wikiTitle) {
+      wikiTitle.textContent = wikiData.title;
+    }
+
+    if (wikiExtract) {
+      wikiExtract.textContent = wikiData.extract;
+    }
+
+    if (wikiLink) {
+      wikiLink.href = wikiData.url;
+      wikiLink.style.display = "inline";
+    }
+
+    if (wikiMeta) {
+      wikiMeta.textContent =
+        "Source: English Wikipedia · retrieved live";
+    }
+  } else {
+    if (wikiTitle) {
+      wikiTitle.textContent =
+        "Wikipedia article not found";
+    }
+
+    if (wikiExtract) {
+      wikiExtract.textContent =
+        "No matching English Wikipedia summary was found for this album.";
+    }
+  }
+}
+
+
+/* =========================================================
+   FAVORITES PANEL
+   ========================================================= */
+
+function renderFavorites() {
+  const list = document.querySelector("#favoritesList");
+
+  if (!list) {
+    return;
+  }
+
+  const favoriteList = favorites();
+
+  if (!favoriteList.length) {
+    list.innerHTML = "<p>No favorites yet.</p>";
+    return;
+  }
+
+  list.innerHTML = favoriteList
+    .map(album => `
+      <div class="favorite-row">
+        <button data-rank="${album.rank}">
+          <strong>${album.artist}</strong> — ${album.title}
+        </button>
+        <span>#${album.rank}</span>
+      </div>
+    `)
+    .join("");
+
+  list
+    .querySelectorAll("button")
+    .forEach(button => {
+      button.onclick = () => {
+        const album = albums.find(
+          item => item.rank == button.dataset.rank
+        );
+
+        if (album) {
+          currentAlbum = album;
+          randomMode = true;
+          render();
+
+          const panel =
+            document.querySelector("#favoritesPanel");
+
+          if (panel) {
+            panel.classList.add("hidden");
+          }
+        }
+      };
+    });
+}
+
+
+/* =========================================================
+   EVENT HANDLERS
+   ========================================================= */
+
+const favoriteButton =
+  document.querySelector("#favorite");
+
+if (favoriteButton) {
+  favoriteButton.onclick = () =>
+    toggleFavorite(currentAlbum);
+}
+
+
+const randomButton =
+  document.querySelector("#randomBtn");
+
+if (randomButton) {
+  randomButton.onclick = () => {
+    randomMode = true;
+    render();
+  };
+}
+
+
+const previousButton =
+  document.querySelector("#prevBtn");
+
+if (previousButton) {
+  previousButton.onclick = () => {
+    randomMode = false;
+    currentDate.setDate(
+      currentDate.getDate() - 1
+    );
+    render();
+  };
+}
+
+
+const nextButton =
+  document.querySelector("#nextBtn");
+
+if (nextButton) {
+  nextButton.onclick = () => {
+    randomMode = false;
+    currentDate.setDate(
+      currentDate.getDate() + 1
+    );
+    render();
+  };
+}
+
+
+const todayButton =
+  document.querySelector("#todayBtn");
+
+if (todayButton) {
+  todayButton.onclick = () => {
+    randomMode = false;
+    currentDate = new Date();
+    render();
+  };
+}
+
+
+const favoritesButton =
+  document.querySelector("#favoritesBtn");
+
+if (favoritesButton) {
+  favoritesButton.onclick = () => {
+    renderFavorites();
+
+    const panel =
+      document.querySelector("#favoritesPanel");
+
+    if (panel) {
+      panel.classList.remove("hidden");
+    }
+  };
+}
+
+
+const closeFavoritesButton =
+  document.querySelector("#closeFavorites");
+
+if (closeFavoritesButton) {
+  closeFavoritesButton.onclick = () => {
+    const panel =
+      document.querySelector("#favoritesPanel");
+
+    if (panel) {
+      panel.classList.add("hidden");
+    }
+  };
+}
+
+
+/* =========================================================
+   START APPLICATION
+   ========================================================= */
+
+(async function init() {
+  await loadAlbums();
+  await render();
+})();
