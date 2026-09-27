@@ -72,7 +72,7 @@ async function loadAlbums() {
       console.log(`Loaded ${albums.length} albums from albums.json`);
     } else {
       console.warn(
-        "albums.json was loaded but contains too few albums. Using fallback data."
+        "albums.json contains too few albums. Using fallback data."
       );
     }
   } catch (error) {
@@ -123,56 +123,288 @@ function formatDate(date) {
 
 
 /* =========================================================
-   WIKIMEDIA COMMONS COVER
+   COVER SEARCH
    ========================================================= */
 
-function coverUrl(album) {
-  const query = encodeURIComponent(
-    `${album.artist} ${album.title}`
-  );
-
-  return (
-    "https://commons.wikimedia.org/w/api.php" +
-    "?action=query" +
-    "&generator=search" +
-    `&gsrsearch=${query}` +
-    "&gsrnamespace=6" +
-    "&gsrlimit=1" +
-    "&prop=imageinfo" +
-    "&iiprop=url" +
-    "&iiurlwidth=900" +
-    "&format=json" +
-    "&origin=*"
-  );
+/*
+ * Normalize text so that comparisons are more tolerant of:
+ * - apostrophes
+ * - punctuation
+ * - accents
+ * - "&" vs "and"
+ * - "The" differences
+ */
+function normalizeText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[’'`]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 
-async function loadCover(album) {
+function cleanArtist(value) {
+  return normalizeText(value)
+    .replace(/\b(the|a)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function cleanTitle(value) {
+  return normalizeText(value)
+    .replace(/\b(remastered|deluxe|expanded|edition|anniversary)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+/*
+ * Words that strongly suggest that the image is NOT
+ * an album cover.
+ */
+const BAD_IMAGE_WORDS = [
+  "logo",
+  "portrait",
+  "photo",
+  "photograph",
+  "poster",
+  "concert",
+  "live",
+  "tour",
+  "band",
+  "group",
+  "person",
+  "singer",
+  "actor",
+  "actress",
+  "press",
+  "promo",
+  "promotional",
+  "screenshot",
+  "discography",
+  "vinyl",
+  "record store",
+  "ticket",
+  "advertisement",
+  "advertising",
+  "wallpaper"
+];
+
+
+/*
+ * Search Wikimedia Commons.
+ */
+async function searchCommons(query) {
+  const url =
+    "https://commons.wikimedia.org/w/api.php" +
+    "?action=query" +
+    "&generator=search" +
+    `&gsrsearch=${encodeURIComponent(query)}` +
+    "&gsrnamespace=6" +
+    "&gsrlimit=10" +
+    "&prop=imageinfo" +
+    "&iiprop=url|extmetadata" +
+    "&iiurlwidth=900" +
+    "&format=json" +
+    "&origin=*";
+
   try {
-    const response = await fetch(coverUrl(album));
+    const response = await fetch(url);
 
     if (!response.ok) {
-      return "";
+      return [];
     }
 
     const data = await response.json();
-    const pages = data.query?.pages;
 
-    if (!pages) {
-      return "";
+    if (!data.query?.pages) {
+      return [];
     }
 
-    const page = Object.values(pages)[0];
-
-    return (
-      page?.imageinfo?.[0]?.thumburl ||
-      page?.imageinfo?.[0]?.url ||
-      ""
-    );
+    return Object.values(data.query.pages);
   } catch (error) {
-    console.warn("Cover lookup failed:", error);
+    console.warn("Commons search failed:", error);
+    return [];
+  }
+}
+
+
+/*
+ * Calculate how well a Commons result matches the album.
+ *
+ * Higher score = stronger confidence.
+ */
+function scoreCover(page, album) {
+  const info = page?.imageinfo?.[0];
+
+  if (!info) {
+    return -1000;
+  }
+
+  const rawText = [
+    page.title || "",
+    info.extmetadata?.ObjectName?.value || "",
+    info.extmetadata?.ImageDescription?.value || ""
+  ].join(" ");
+
+  const text = normalizeText(rawText);
+
+  const artist = cleanArtist(album.artist);
+  const title = cleanTitle(album.title);
+
+  let score = 0;
+
+  /*
+   * Exact album title is the strongest signal.
+   */
+  if (text.includes(title)) {
+    score += 60;
+  }
+
+  /*
+   * Artist name.
+   */
+  if (text.includes(artist)) {
+    score += 50;
+  }
+
+  /*
+   * "cover" is a very useful signal.
+   */
+  if (text.includes("cover")) {
+    score += 35;
+  }
+
+  if (text.includes("album cover")) {
+    score += 25;
+  }
+
+  /*
+   * Year can help distinguish albums with identical titles.
+   */
+  if (
+    album.year &&
+    text.includes(String(album.year))
+  ) {
+    score += 20;
+  }
+
+  /*
+   * Penalize obviously unrelated images.
+   */
+  for (const badWord of BAD_IMAGE_WORDS) {
+    if (text.includes(normalizeText(badWord))) {
+      score -= 40;
+    }
+  }
+
+  /*
+   * Prefer reasonably square images.
+   */
+  const width = Number(info.width || 0);
+  const height = Number(info.height || 0);
+
+  if (width > 0 && height > 0) {
+    const ratio = width / height;
+
+    if (ratio >= 0.75 && ratio <= 1.35) {
+      score += 15;
+    } else {
+      score -= 10;
+    }
+  }
+
+  /*
+   * Prefer actual album-cover file names.
+   */
+  const filename = normalizeText(page.title || "");
+
+  if (
+    filename.includes("album cover") ||
+    filename.includes("cover")
+  ) {
+    score += 20;
+  }
+
+  return score;
+}
+
+
+/*
+ * Try several increasingly broad searches.
+ *
+ * IMPORTANT:
+ * We do NOT simply take the first Commons result.
+ */
+async function loadCover(album) {
+  const searches = [
+    `"${album.artist}" "${album.title}" album cover`,
+    `"${album.artist}" "${album.title}"`,
+    `${album.artist} ${album.title} cover`
+  ];
+
+  let allCandidates = [];
+
+  for (const query of searches) {
+    const pages = await searchCommons(query);
+
+    for (const page of pages) {
+      if (!allCandidates.some(p => p.pageid === page.pageid)) {
+        allCandidates.push(page);
+      }
+    }
+
+    /*
+     * If we already have several candidates, no need
+     * to hammer the API with more searches.
+     */
+    if (allCandidates.length >= 15) {
+      break;
+    }
+  }
+
+  if (!allCandidates.length) {
     return "";
   }
+
+  const scored = allCandidates
+    .map(page => ({
+      page,
+      score: scoreCover(page, album)
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  /*
+   * Only accept a result if it reaches a reasonable
+   * confidence threshold.
+   *
+   * This is deliberate: a placeholder is preferable
+   * to showing the wrong album cover.
+   */
+  const best = scored[0];
+
+  console.log(
+    `Cover search: ${album.artist} — ${album.title}`,
+    best?.score,
+    best?.page?.title
+  );
+
+  if (!best || best.score < 70) {
+    return "";
+  }
+
+  const imageInfo = best.page.imageinfo?.[0];
+
+  return (
+    imageInfo?.thumburl ||
+    imageInfo?.url ||
+    ""
+  );
 }
 
 
@@ -273,17 +505,21 @@ function toggleFavorite(album) {
 
 
 function updateFavoriteUI() {
-  const favoriteCount = document.querySelector("#favCount");
-  const favoriteButton = document.querySelector("#favorite");
+  const favoriteCount =
+    document.querySelector("#favCount");
+
+  const favoriteButton =
+    document.querySelector("#favorite");
 
   if (favoriteCount) {
     favoriteCount.textContent = favorites().length;
   }
 
   if (favoriteButton && currentAlbum) {
-    favoriteButton.textContent = isFavorite(currentAlbum)
-      ? "♥ Favorite"
-      : "♡ Favorite";
+    favoriteButton.textContent =
+      isFavorite(currentAlbum)
+        ? "♥ Favorite"
+        : "♡ Favorite";
   }
 }
 
@@ -322,7 +558,8 @@ function placeholderCover(album) {
     </svg>
   `;
 
-  return "data:image/svg+xml," + encodeURIComponent(svg);
+  return "data:image/svg+xml," +
+    encodeURIComponent(svg);
 }
 
 
@@ -337,17 +574,39 @@ async function render() {
 
   currentAlbum = album;
 
-  const dateElement = document.querySelector("#date");
-  const artistElement = document.querySelector("#artist");
-  const titleElement = document.querySelector("#title");
-  const yearElement = document.querySelector("#year");
-  const rankElement = document.querySelector("#rank");
-  const labelElement = document.querySelector("#label");
-  const factYearElement = document.querySelector("#factYear");
-  const factRankElement = document.querySelector("#factRank");
-  const coverElement = document.querySelector("#cover");
-  const appleElement = document.querySelector("#apple");
-  const spotifyElement = document.querySelector("#spotify");
+  const dateElement =
+    document.querySelector("#date");
+
+  const artistElement =
+    document.querySelector("#artist");
+
+  const titleElement =
+    document.querySelector("#title");
+
+  const yearElement =
+    document.querySelector("#year");
+
+  const rankElement =
+    document.querySelector("#rank");
+
+  const labelElement =
+    document.querySelector("#label");
+
+  const factYearElement =
+    document.querySelector("#factYear");
+
+  const factRankElement =
+    document.querySelector("#factRank");
+
+  const coverElement =
+    document.querySelector("#cover");
+
+  const appleElement =
+    document.querySelector("#apple");
+
+  const spotifyElement =
+    document.querySelector("#spotify");
+
 
   if (dateElement) {
     dateElement.textContent = randomMode
@@ -368,20 +627,25 @@ async function render() {
   }
 
   if (rankElement) {
-    rankElement.textContent = `ROLLING STONE #${album.rank}`;
+    rankElement.textContent =
+      `ROLLING STONE #${album.rank}`;
   }
 
   if (labelElement) {
-    labelElement.textContent = album.label || "—";
+    labelElement.textContent =
+      album.label || "—";
   }
 
   if (factYearElement) {
-    factYearElement.textContent = album.year || "—";
+    factYearElement.textContent =
+      album.year || "—";
   }
 
   if (factRankElement) {
-    factRankElement.textContent = `#${album.rank}`;
+    factRankElement.textContent =
+      `#${album.rank}`;
   }
+
 
   if (appleElement) {
     appleElement.href =
@@ -397,17 +661,36 @@ async function render() {
       )}`;
   }
 
+
+  /*
+   * Show placeholder immediately.
+   */
   if (coverElement) {
-    coverElement.src = "";
-    coverElement.alt = `${album.artist} — ${album.title}`;
+    coverElement.src =
+      placeholderCover(album);
+
+    coverElement.alt =
+      `${album.artist} — ${album.title}`;
   }
+
 
   updateFavoriteUI();
 
-  const wikiTitle = document.querySelector("#wikiTitle");
-  const wikiExtract = document.querySelector("#wikiExtract");
-  const wikiLink = document.querySelector("#wikiLink");
-  const wikiMeta = document.querySelector("#wikiMeta");
+
+  /* Wikipedia loading state */
+
+  const wikiTitle =
+    document.querySelector("#wikiTitle");
+
+  const wikiExtract =
+    document.querySelector("#wikiExtract");
+
+  const wikiLink =
+    document.querySelector("#wikiLink");
+
+  const wikiMeta =
+    document.querySelector("#wikiMeta");
+
 
   if (wikiTitle) {
     wikiTitle.textContent = "Loading…";
@@ -426,54 +709,49 @@ async function render() {
     wikiMeta.textContent = "";
   }
 
-  /*
-   * Display a placeholder immediately.
-   * This means the album itself is visible even if
-   * Wikimedia or Wikipedia is temporarily unavailable.
-   */
-  if (coverElement) {
-    coverElement.src = placeholderCover(album);
-  }
 
   /*
-   * Load external information independently.
-   * Failure of one service does not prevent the other.
+   * Load cover and Wikipedia independently.
    */
-  const [cover, wiki] = await Promise.allSettled([
-    loadCover(album),
-    loadWikipedia(album)
-  ]);
+  const [coverResult, wikiResult] =
+    await Promise.allSettled([
+      loadCover(album),
+      loadWikipedia(album)
+    ]);
 
-  /*
-   * Cover
-   */
+
+  /* Cover */
+
   if (
-    cover.status === "fulfilled" &&
-    cover.value &&
+    coverResult.status === "fulfilled" &&
+    coverResult.value &&
     coverElement
   ) {
-    coverElement.src = cover.value;
+    coverElement.src =
+      coverResult.value;
   }
 
-  /*
-   * Wikipedia
-   */
+
+  /* Wikipedia */
+
   if (
-    wiki.status === "fulfilled" &&
-    wiki.value
+    wikiResult.status === "fulfilled" &&
+    wikiResult.value
   ) {
-    const wikiData = wiki.value;
+    const wiki = wikiResult.value;
 
     if (wikiTitle) {
-      wikiTitle.textContent = wikiData.title;
+      wikiTitle.textContent =
+        wiki.title;
     }
 
     if (wikiExtract) {
-      wikiExtract.textContent = wikiData.extract;
+      wikiExtract.textContent =
+        wiki.extract;
     }
 
     if (wikiLink) {
-      wikiLink.href = wikiData.url;
+      wikiLink.href = wiki.url;
       wikiLink.style.display = "inline";
     }
 
@@ -500,7 +778,8 @@ async function render() {
    ========================================================= */
 
 function renderFavorites() {
-  const list = document.querySelector("#favoritesList");
+  const list =
+    document.querySelector("#favoritesList");
 
   if (!list) {
     return;
@@ -509,7 +788,8 @@ function renderFavorites() {
   const favoriteList = favorites();
 
   if (!favoriteList.length) {
-    list.innerHTML = "<p>No favorites yet.</p>";
+    list.innerHTML =
+      "<p>No favorites yet.</p>";
     return;
   }
 
@@ -529,16 +809,20 @@ function renderFavorites() {
     .forEach(button => {
       button.onclick = () => {
         const album = albums.find(
-          item => item.rank == button.dataset.rank
+          item =>
+            item.rank == button.dataset.rank
         );
 
         if (album) {
           currentAlbum = album;
           randomMode = true;
+
           render();
 
           const panel =
-            document.querySelector("#favoritesPanel");
+            document.querySelector(
+              "#favoritesPanel"
+            );
 
           if (panel) {
             panel.classList.add("hidden");
@@ -579,9 +863,11 @@ const previousButton =
 if (previousButton) {
   previousButton.onclick = () => {
     randomMode = false;
+
     currentDate.setDate(
       currentDate.getDate() - 1
     );
+
     render();
   };
 }
@@ -593,9 +879,11 @@ const nextButton =
 if (nextButton) {
   nextButton.onclick = () => {
     randomMode = false;
+
     currentDate.setDate(
       currentDate.getDate() + 1
     );
+
     render();
   };
 }
@@ -621,7 +909,9 @@ if (favoritesButton) {
     renderFavorites();
 
     const panel =
-      document.querySelector("#favoritesPanel");
+      document.querySelector(
+        "#favoritesPanel"
+      );
 
     if (panel) {
       panel.classList.remove("hidden");
@@ -636,7 +926,9 @@ const closeFavoritesButton =
 if (closeFavoritesButton) {
   closeFavoritesButton.onclick = () => {
     const panel =
-      document.querySelector("#favoritesPanel");
+      document.querySelector(
+        "#favoritesPanel"
+      );
 
     if (panel) {
       panel.classList.add("hidden");
@@ -646,7 +938,7 @@ if (closeFavoritesButton) {
 
 
 /* =========================================================
-   START APPLICATION
+   START
    ========================================================= */
 
 (async function init() {
