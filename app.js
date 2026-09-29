@@ -123,298 +123,27 @@ function formatDate(date) {
 
 
 /* =========================================================
-   COVER SEARCH
-   ========================================================= */
-
-/*
- * Normalize text so that comparisons are more tolerant of:
- * - apostrophes
- * - punctuation
- * - accents
- * - "&" vs "and"
- * - "The" differences
- */
-function normalizeText(value) {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[’'`]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-
-function cleanArtist(value) {
-  return normalizeText(value)
-    .replace(/\b(the|a)\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-
-function cleanTitle(value) {
-  return normalizeText(value)
-    .replace(/\b(remastered|deluxe|expanded|edition|anniversary)\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-
-/*
- * Words that strongly suggest that the image is NOT
- * an album cover.
- */
-const BAD_IMAGE_WORDS = [
-  "logo",
-  "portrait",
-  "photo",
-  "photograph",
-  "poster",
-  "concert",
-  "live",
-  "tour",
-  "band",
-  "group",
-  "person",
-  "singer",
-  "actor",
-  "actress",
-  "press",
-  "promo",
-  "promotional",
-  "screenshot",
-  "discography",
-  "vinyl",
-  "record store",
-  "ticket",
-  "advertisement",
-  "advertising",
-  "wallpaper"
-];
-
-
-/*
- * Search Wikimedia Commons.
- */
-async function searchCommons(query) {
-  const url =
-    "https://commons.wikimedia.org/w/api.php" +
-    "?action=query" +
-    "&generator=search" +
-    `&gsrsearch=${encodeURIComponent(query)}` +
-    "&gsrnamespace=6" +
-    "&gsrlimit=10" +
-    "&prop=imageinfo" +
-    "&iiprop=url|extmetadata" +
-    "&iiurlwidth=900" +
-    "&format=json" +
-    "&origin=*";
-
-  try {
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      return [];
-    }
-
-    const data = await response.json();
-
-    if (!data.query?.pages) {
-      return [];
-    }
-
-    return Object.values(data.query.pages);
-  } catch (error) {
-    console.warn("Commons search failed:", error);
-    return [];
-  }
-}
-
-
-/*
- * Calculate how well a Commons result matches the album.
- *
- * Higher score = stronger confidence.
- */
-function scoreCover(page, album) {
-  const info = page?.imageinfo?.[0];
-
-  if (!info) {
-    return -1000;
-  }
-
-  const rawText = [
-    page.title || "",
-    info.extmetadata?.ObjectName?.value || "",
-    info.extmetadata?.ImageDescription?.value || ""
-  ].join(" ");
-
-  const text = normalizeText(rawText);
-
-  const artist = cleanArtist(album.artist);
-  const title = cleanTitle(album.title);
-
-  let score = 0;
-
-  /*
-   * Exact album title is the strongest signal.
-   */
-  if (text.includes(title)) {
-    score += 60;
-  }
-
-  /*
-   * Artist name.
-   */
-  if (text.includes(artist)) {
-    score += 50;
-  }
-
-  /*
-   * "cover" is a very useful signal.
-   */
-  if (text.includes("cover")) {
-    score += 35;
-  }
-
-  if (text.includes("album cover")) {
-    score += 25;
-  }
-
-  /*
-   * Year can help distinguish albums with identical titles.
-   */
-  if (
-    album.year &&
-    text.includes(String(album.year))
-  ) {
-    score += 20;
-  }
-
-  /*
-   * Penalize obviously unrelated images.
-   */
-  for (const badWord of BAD_IMAGE_WORDS) {
-    if (text.includes(normalizeText(badWord))) {
-      score -= 40;
-    }
-  }
-
-  /*
-   * Prefer reasonably square images.
-   */
-  const width = Number(info.width || 0);
-  const height = Number(info.height || 0);
-
-  if (width > 0 && height > 0) {
-    const ratio = width / height;
-
-    if (ratio >= 0.75 && ratio <= 1.35) {
-      score += 15;
-    } else {
-      score -= 10;
-    }
-  }
-
-  /*
-   * Prefer actual album-cover file names.
-   */
-  const filename = normalizeText(page.title || "");
-
-  if (
-    filename.includes("album cover") ||
-    filename.includes("cover")
-  ) {
-    score += 20;
-  }
-
-  return score;
-}
-
-
-/*
- * Try several increasingly broad searches.
- *
- * IMPORTANT:
- * We do NOT simply take the first Commons result.
- */
-async function loadCover(album) {
-  const searches = [
-    `"${album.artist}" "${album.title}" album cover`,
-    `"${album.artist}" "${album.title}"`,
-    `${album.artist} ${album.title} cover`
-  ];
-
-  let allCandidates = [];
-
-  for (const query of searches) {
-    const pages = await searchCommons(query);
-
-    for (const page of pages) {
-      if (!allCandidates.some(p => p.pageid === page.pageid)) {
-        allCandidates.push(page);
-      }
-    }
-
-    /*
-     * If we already have several candidates, no need
-     * to hammer the API with more searches.
-     */
-    if (allCandidates.length >= 15) {
-      break;
-    }
-  }
-
-  if (!allCandidates.length) {
-    return "";
-  }
-
-  const scored = allCandidates
-    .map(page => ({
-      page,
-      score: scoreCover(page, album)
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  /*
-   * Only accept a result if it reaches a reasonable
-   * confidence threshold.
-   *
-   * This is deliberate: a placeholder is preferable
-   * to showing the wrong album cover.
-   */
-  const best = scored[0];
-
-  console.log(
-    `Cover search: ${album.artist} — ${album.title}`,
-    best?.score,
-    best?.page?.title
-  );
-
-  if (!best || best.score < 70) {
-    return "";
-  }
-
-  const imageInfo = best.page.imageinfo?.[0];
-
-  return (
-    imageInfo?.thumburl ||
-    imageInfo?.url ||
-    ""
-  );
-}
-
-
-/* =========================================================
    WIKIPEDIA
    ========================================================= */
+
+/*
+ * Wikipedia is now the ONLY image source.
+ *
+ * The /page/summary endpoint provides:
+ * - article title
+ * - article extract
+ * - thumbnail
+ * - original image
+ * - canonical Wikipedia URL
+ *
+ * See:
+ * https://www.mediawiki.org/wiki/Page_Content_Service
+ */
 
 async function loadWikipedia(album) {
   const candidates = [
     `${album.artist} - ${album.title}`,
+    `${album.title} (${album.artist} album)`,
     album.title
   ];
 
@@ -425,7 +154,9 @@ async function loadWikipedia(album) {
       `https://en.wikipedia.org/api/rest_v1/page/summary/${title}`;
 
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        cache: "no-store"
+      });
 
       if (!response.ok) {
         continue;
@@ -433,10 +164,27 @@ async function loadWikipedia(album) {
 
       const data = await response.json();
 
+      /*
+       * Ignore disambiguation pages.
+       */
+      if (data.type === "disambiguation") {
+        continue;
+      }
+
       if (data.extract) {
         return {
           title: data.title,
           extract: data.extract,
+
+          /*
+           * Wikipedia thumbnail is preferred because it is
+           * already optimized for web display.
+           */
+          image:
+            data.thumbnail?.source ||
+            data.originalimage?.source ||
+            "",
+
           url:
             data.content_urls?.desktop?.page ||
             `https://en.wikipedia.org/wiki/${encodeURIComponent(
@@ -647,12 +395,17 @@ async function render() {
   }
 
 
+  /* Apple Music */
+
   if (appleElement) {
     appleElement.href =
       `https://music.apple.com/us/search?term=${encodeURIComponent(
         `${album.artist} ${album.title}`
       )}`;
   }
+
+
+  /* Spotify */
 
   if (spotifyElement) {
     spotifyElement.href =
@@ -663,8 +416,9 @@ async function render() {
 
 
   /*
-   * Show placeholder immediately.
+   * Show placeholder while Wikipedia loads.
    */
+
   if (coverElement) {
     coverElement.src =
       placeholderCover(album);
@@ -711,55 +465,62 @@ async function render() {
 
 
   /*
-   * Load cover and Wikipedia independently.
+   * Wikipedia supplies BOTH:
+   * - text
+   * - image
+   *
+   * So we only need one network request.
    */
-  const [coverResult, wikiResult] =
-    await Promise.allSettled([
-      loadCover(album),
-      loadWikipedia(album)
-    ]);
+
+  const wiki = await loadWikipedia(album);
 
 
-  /* Cover */
+  if (wiki) {
 
-  if (
-    coverResult.status === "fulfilled" &&
-    coverResult.value &&
-    coverElement
-  ) {
-    coverElement.src =
-      coverResult.value;
-  }
+    /* Image */
+
+    if (wiki.image && coverElement) {
+      coverElement.src = wiki.image;
+    }
 
 
-  /* Wikipedia */
-
-  if (
-    wikiResult.status === "fulfilled" &&
-    wikiResult.value
-  ) {
-    const wiki = wikiResult.value;
+    /* Article title */
 
     if (wikiTitle) {
       wikiTitle.textContent =
         wiki.title;
     }
 
+
+    /* Article summary */
+
     if (wikiExtract) {
       wikiExtract.textContent =
         wiki.extract;
     }
+
+
+    /* Wikipedia link */
 
     if (wikiLink) {
       wikiLink.href = wiki.url;
       wikiLink.style.display = "inline";
     }
 
+
     if (wikiMeta) {
       wikiMeta.textContent =
         "Source: English Wikipedia · retrieved live";
     }
+
   } else {
+
+    /*
+     * No Wikipedia article or image.
+     * Keep the placeholder rather than using
+     * an unrelated image from another source.
+     */
+
     if (wikiTitle) {
       wikiTitle.textContent =
         "Wikipedia article not found";
@@ -938,7 +699,7 @@ if (closeFavoritesButton) {
 
 
 /* =========================================================
-   START
+   START APPLICATION
    ========================================================= */
 
 (async function init() {
